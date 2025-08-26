@@ -3,16 +3,16 @@
 	"id": "s3-backup-mod",
 	"version": "${version}",
 	"name": "S3 Backup Mod",
-	"description": "This is an example description! Tell everyone what your mod is about!",
+	"description": "Save your precious world files to S3 cloud storage!",
 	"authors": [
-		"Me!"
+		"Ethan Murphy"
 	],
 	"contact": {
 		"homepage": "https://fabricmc.net/",
-		"sources": "https://github.com/FabricMC/fabric-example-mod"
+		"sources": "https://github.com/emurphy04/S3-Backup-Mod"
 	},
 	"license": "CC0-1.0",
-	"icon": "assets/s3-backup-mod/icon.png",
+	"icon": "assets/s3-backup-mod/GreenBucket.png",
 	"environment": "server",
 	"entrypoints": {
 		"server": [
