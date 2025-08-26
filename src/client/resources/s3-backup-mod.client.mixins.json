@@ -1,0 +1,11 @@
+{
+	"required": true,
+	"package": "freesmelly.s3backup.mixin.client",
+	"compatibilityLevel": "JAVA_21",
+	"client": [
+		"ExampleClientMixin"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	}
+}

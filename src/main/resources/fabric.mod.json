@@ -1,0 +1,31 @@
+{
+	"schemaVersion": 1,
+	"id": "s3-backup-mod",
+	"version": "${version}",
+	"name": "S3 Backup Mod",
+	"description": "This is an example description! Tell everyone what your mod is about!",
+	"authors": [
+		"Me!"
+	],
+	"contact": {
+		"homepage": "https://fabricmc.net/",
+		"sources": "https://github.com/FabricMC/fabric-example-mod"
+	},
+	"license": "CC0-1.0",
+	"icon": "assets/s3-backup-mod/icon.png",
+	"environment": "server",
+	"entrypoints": {
+		"server": [
+			"freesmelly.s3backup.BackupBootstrap"
+		]
+	},
+	"depends": {
+		"fabricloader": ">=0.17.2",
+		"minecraft": "~1.21.8",
+		"java": ">=21",
+		"fabric-api": "*"
+	},
+	"suggests": {
+		"another-mod": "*"
+	}
+}
