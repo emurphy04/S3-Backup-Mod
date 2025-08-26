@@ -1,5 +1,7 @@
 # S3 Backup Mod (Fabric • Server-Only)
 
+![Green Minecraft Bucket](src/main/resources/assets/s3-backup-mod/GreenBucket.png)
+
 Back up your Minecraft server world to Amazon S3 on a schedule — with an in-game setup wizard, a manual `/backupnow` command, and automatic pruning to **keep only the newest N backups**.
 
 > ⚠️ **Pricing & Liability**  
