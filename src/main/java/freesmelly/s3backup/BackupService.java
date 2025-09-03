@@ -10,10 +10,9 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.command.CommandManager;
 import net.minecraft.server.command.ServerCommandSource;
 import net.minecraft.text.Text;
-import net.minecraft.util.WorldSavePath; // Yarn
+import net.minecraft.util.WorldSavePath;
 import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
-import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.S3Object;
 
@@ -32,17 +31,18 @@ public final class BackupService {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final String MODID = "s3-backup-mod";
 
-    // Non-secret config (written to config/s3-backup-mod.json)
     private static class Config {
-        int    backupIntervalMinutes   = 10;
-        String s3Bucket                = "";
-        String s3Prefix                = "mc-backups";
-        String awsRegion               = System.getenv().getOrDefault("AWS_REGION", "us-east-1");
-        boolean keepLatestLocal        = false;
+        int backupIntervalMinutes = 10;
+        String s3Bucket = "";
+        String s3Prefix = "mc-backups";
+        String awsRegion = System.getenv().getOrDefault("AWS_REGION", "us-east-1");
+        boolean keepLatestLocal = false;
         boolean deleteLocalAfterUpload = true;
-        String zipBaseName             = "world-backup";
-        List<String> excludeGlobs      = List.of("logs/**","backups/**","crash-reports/**");
-        int keepLastNS3                = 5; // keep newest N backups in S3
+        String zipBaseName = "world-backup";
+        List<String> excludeGlobs = List.of("logs/**","backups/**","crash-reports/**");
+        int keepLastNS3 = 5;
+        int multipartThresholdMB = 100;
+        int multipartPartSizeMB = 64;
     }
 
     private static volatile Config cfg;
@@ -50,9 +50,8 @@ public final class BackupService {
         Thread t = new Thread(r, "S3Backup-IO"); t.setDaemon(true); return t;
     });
     private static final AtomicLong ticks = new AtomicLong();
-    private static volatile long ticksPerBackup = 20L * 60L * 10L; // default 10 minutes
+    private static volatile long ticksPerBackup = 20L * 60L * 10L;
 
-    // gamerule logAdminCommands safeguard during wizard
     private static boolean originalLogAdmin = true;
     private static void setLogAdminCommands(MinecraftServer server, boolean value) {
         try {
@@ -74,7 +73,6 @@ public final class BackupService {
         cfg = loadOrCreateConfig();
         S3ClientHolder.init(cfg.awsRegion);
 
-        // /backupnow
         CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, env) -> {
             dispatcher.register(
                     LiteralArgumentBuilder.<ServerCommandSource>literal("backupnow")
@@ -88,51 +86,47 @@ public final class BackupService {
             );
         });
 
-        // /s3setup (wizard, set, show, test, finish)
         CommandRegistrationCallback.EVENT.register((dispatcher, ra, env) -> {
             var root = CommandManager.literal("s3setup")
                     .requires(src -> src.hasPermissionLevel(3))
-
                     .then(CommandManager.literal("wizard").executes(ctx -> {
                         var server = ctx.getSource().getServer();
                         setLogAdminCommands(server, false);
                         ctx.getSource().sendFeedback(() -> Text.literal(
-                                "§a[S3Backup] Wizard started. Command logging temporarily disabled.\n" +
+                                "§a[S3Backup] Wizard started.\n" +
                                         "Step 1: /s3setup set region <aws-region>\n" +
                                         "Step 2: /s3setup set bucket <bucket-name>\n" +
                                         "Step 3: /s3setup set prefix <optional/key/prefix>\n" +
-                                        "Step 4: /s3setup set accessKey <AKIA...>\n" +
-                                        "Step 5: /s3setup set secretKey <your-secret>\n" +
-                                        "Step 6: (optional) /s3setup set sessionToken <token>\n" +
-                                        "Optional: /s3setup set keep 5  (how many backups to keep)\n" +
+                                        "Step 4: /s3setup set keep 5\n" +
+                                        "Step 5: /s3setup set accessKey <AKIA...>\n" +
+                                        "Step 6: /s3setup set secretKey <your-secret>\n" +
+                                        "Step 7: (optional) /s3setup set sessionToken <token>\n" +
                                         "Then: /s3setup test\n" +
                                         "Finally: /s3setup finish"), true);
                         return 1;
                     }))
-
                     .then(CommandManager.literal("finish").executes(ctx -> {
                         restoreLogAdmin(ctx.getSource().getServer());
-                        ctx.getSource().sendFeedback(() -> Text.literal("§a[S3Backup] Wizard finished. Command logging restored."), true);
+                        ctx.getSource().sendFeedback(() -> Text.literal("§a[S3Backup] Wizard finished."), true);
                         return 1;
                     }))
-
                     .then(CommandManager.literal("show").executes(ctx -> {
                         var inline = CredentialsStore.load();
-                        String source = (inline != null && inline.accessKeyId != null) ? "Inline secrets file"
-                                : "Default AWS provider chain";
+                        String source = (inline != null && inline.accessKeyId != null) ? "Inline secrets file" : "Default AWS provider chain";
                         ctx.getSource().sendFeedback(() -> Text.literal(
-                                "§bRegion:     §f" + cfg.awsRegion + "\n" +
-                                        "§bBucket:     §f" + cfg.s3Bucket + "\n" +
-                                        "§bPrefix:     §f" + cfg.s3Prefix + "\n" +
-                                        "§bKeep last:  §f" + cfg.keepLastNS3 + "\n" +
-                                        "§bCreds:      §f" + source), false);
+                                "§bRegion:         §f" + cfg.awsRegion + "\n" +
+                                        "§bBucket:         §f" + cfg.s3Bucket + "\n" +
+                                        "§bPrefix:         §f" + cfg.s3Prefix + "\n" +
+                                        "§bKeep last:      §f" + cfg.keepLastNS3 + "\n" +
+                                        "§bMultipart thr.: §f" + cfg.multipartThresholdMB + " MB\n" +
+                                        "§bMultipart part: §f" + cfg.multipartPartSizeMB + " MB\n" +
+                                        "§bCreds:          §f" + source), false);
                         return 1;
                     }))
-
                     .then(CommandManager.literal("set")
                             .then(CommandManager.argument("field", com.mojang.brigadier.arguments.StringArgumentType.word())
                                     .suggests((c,b) -> {
-                                        for (var s : java.util.List.of("region","bucket","prefix","accessKey","secretKey","sessionToken","keep")) b.suggest(s);
+                                        for (var s : java.util.List.of("region","bucket","prefix","keep","multipartThresholdMB","multipartPartSizeMB","accessKey","secretKey","sessionToken")) b.suggest(s);
                                         return b.buildFuture();
                                     })
                                     .then(CommandManager.argument("value", com.mojang.brigadier.arguments.StringArgumentType.greedyString())
@@ -142,50 +136,35 @@ public final class BackupService {
                                                 handleSet(ctx.getSource(), field, value);
                                                 return 1;
                                             }))))
-
-                .then(CommandManager.literal("test").executes(ctx -> {
-                var server = ctx.getSource().getServer();
-                try {
-                    S3ClientHolder.rebuild(cfg.awsRegion); // pick up latest secrets/region
-
-                    String prefix = (cfg.s3Prefix == null || cfg.s3Prefix.isBlank())
-                            ? "" : cfg.s3Prefix.replaceAll("^/+", "").replaceAll("/+$","") + "/";
-                    String key = prefix + "_s3backup-test-" + System.currentTimeMillis() + ".txt";
-
-                    Path outDir = Paths.get("config", MODID);
-                    Files.createDirectories(outDir);
-                    Path tmp = Files.createTempFile(outDir, "s3test-", ".txt");
-                    Files.writeString(tmp, "it works", StandardCharsets.UTF_8);
-
-                    PutObjectRequest req = PutObjectRequest.builder()
-                            .bucket(cfg.s3Bucket)
-                            .key(key)
-                            .build();
-
-                    S3ClientHolder.client().putObject(req, tmp);
-                    try { Files.deleteIfExists(tmp); } catch (IOException ignored) {}
-
-                    ctx.getSource().sendFeedback(() -> Text.literal("§a[S3Backup] Test uploaded to s3://" + cfg.s3Bucket + "/" + key), false);
-                } catch (Exception e) {
-                    ctx.getSource().sendError(Text.literal("§c[S3Backup] Test failed: " + e.getMessage()));
-                }
-                return 1;
-            }));
-
+                    .then(CommandManager.literal("test").executes(ctx -> {
+                        var server = ctx.getSource().getServer();
+                        try {
+                            S3ClientHolder.rebuild(cfg.awsRegion);
+                            String prefix = (cfg.s3Prefix == null || cfg.s3Prefix.isBlank()) ? "" : cfg.s3Prefix.replaceAll("^/+", "").replaceAll("/+$","") + "/";
+                            String key = prefix + "_s3backup-test-" + System.currentTimeMillis() + ".txt";
+                            Path outDir = Paths.get("config", MODID);
+                            Files.createDirectories(outDir);
+                            Path tmp = Files.createTempFile(outDir, "s3test-", ".txt");
+                            Files.writeString(tmp, "it works", StandardCharsets.UTF_8);
+                            PutObjectRequest req = PutObjectRequest.builder().bucket(cfg.s3Bucket).key(key).build();
+                            S3ClientHolder.client().putObject(req, tmp);
+                            try { Files.deleteIfExists(tmp); } catch (IOException ignored) {}
+                            ctx.getSource().sendFeedback(() -> Text.literal("§a[S3Backup] Test uploaded to s3://" + cfg.s3Bucket + "/" + key), false);
+                        } catch (Exception e) {
+                            ctx.getSource().sendError(Text.literal("§c[S3Backup] Test failed: " + e.getMessage()));
+                        }
+                        return 1;
+                    }));
             dispatcher.register(root);
         });
 
-        // info + ticking schedule
         ServerLifecycleEvents.SERVER_STARTED.register(server -> {
-            server.getPlayerManager().broadcast(
-                    Text.literal("[S3Backup] Scheduled backups every " + cfg.backupIntervalMinutes + " minutes."), false);
+            server.getPlayerManager().broadcast(Text.literal("[S3Backup] Scheduled backups every " + cfg.backupIntervalMinutes + " minutes."), false);
         });
 
         ticksPerBackup = Math.max(1, cfg.backupIntervalMinutes) * 60L * 20L;
         ServerTickEvents.END_SERVER_TICK.register(server -> {
-            if (ticksPerBackup > 0 && ticks.incrementAndGet() % ticksPerBackup == 0) {
-                startBackup(server);
-            }
+            if (ticksPerBackup > 0 && ticks.incrementAndGet() % ticksPerBackup == 0) startBackup(server);
         });
     }
 
@@ -214,8 +193,12 @@ public final class BackupService {
 
     private static void handleSet(ServerCommandSource src, String field, String value) {
         field = field.toLowerCase();
-        String finalField = field;
         switch (field) {
+            case "interval" -> {
+                cfg.backupIntervalMinutes = Integer.parseInt(value.trim());
+                saveConfig(cfg);
+                src.sendFeedback(() -> Text.literal("§aInterval set."), false);
+            }
             case "region" -> {
                 cfg.awsRegion = value.trim();
                 saveConfig(cfg);
@@ -238,19 +221,39 @@ public final class BackupService {
                     saveConfig(cfg);
                     src.sendFeedback(() -> Text.literal("§aKeep-last set to " + cfg.keepLastNS3 + "."), false);
                 } catch (NumberFormatException e) {
-                    src.sendError(Text.literal("§cInvalid number for keep. Example: /s3setup set keep 5"));
+                    src.sendError(Text.literal("§cInvalid number for keep."));
+                }
+            }
+            case "multipartthresholdmb" -> {
+                try {
+                    int mb = Integer.parseInt(value.trim());
+                    cfg.multipartThresholdMB = Math.max(5, mb);
+                    saveConfig(cfg);
+                    src.sendFeedback(() -> Text.literal("§aMultipart threshold set to " + cfg.multipartThresholdMB + " MB."), false);
+                } catch (NumberFormatException e) {
+                    src.sendError(Text.literal("§cInvalid number for multipartThresholdMB."));
+                }
+            }
+            case "multipartpartsizemb" -> {
+                try {
+                    int mb = Integer.parseInt(value.trim());
+                    cfg.multipartPartSizeMB = Math.max(5, mb);
+                    saveConfig(cfg);
+                    src.sendFeedback(() -> Text.literal("§aMultipart part size set to " + cfg.multipartPartSizeMB + " MB."), false);
+                } catch (NumberFormatException e) {
+                    src.sendError(Text.literal("§cInvalid number for multipartPartSizeMB."));
                 }
             }
             case "accesskey", "secretkey", "sessiontoken" -> {
                 var s = CredentialsStore.load();
                 if (s == null) s = new CredentialsStore.Secrets();
-                if (field.equals("accesskey"))   s.accessKeyId = value.trim();
-                if (field.equals("secretkey"))   s.secretAccessKey = value.trim();
+                if (field.equals("accesskey")) s.accessKeyId = value.trim();
+                if (field.equals("secretkey")) s.secretAccessKey = value.trim();
                 if (field.equals("sessiontoken")) s.sessionToken = value.trim();
                 CredentialsStore.save(s);
-                src.sendFeedback(() -> Text.literal("§aCredential saved (" + finalField + "). Value is hidden."), false);
+                src.sendFeedback(() -> Text.literal("§aCredential saved."), false);
             }
-            default -> src.sendError(Text.literal("§cUnknown field. Use region|bucket|prefix|keep|accessKey|secretKey|sessionToken"));
+            default -> src.sendError(Text.literal("§cUnknown field."));
         }
     }
 
@@ -279,32 +282,28 @@ public final class BackupService {
 
     private static void runBackupIO(MinecraftServer server) {
         try {
-            // Yarn:
             Path levelRoot = server.getSavePath(WorldSavePath.ROOT).toAbsolutePath();
-
             Path outDir = Paths.get("config", MODID);
             Files.createDirectories(outDir);
-
             String ts = LocalDateTime.now().toString().replace(':','-');
             String zipName = cfg.zipBaseName + "-" + ts + ".zip";
             Path zipPath = outDir.resolve(zipName);
-
             ZipUtil.zipDirectory(levelRoot, zipPath, cfg.excludeGlobs);
-
             String prefix = (cfg.s3Prefix == null) ? "" : cfg.s3Prefix.replaceAll("^/+", "").replaceAll("/+$","");
             String key = prefix.isBlank() ? zipName : prefix + "/" + zipName;
 
-            PutObjectRequest req = PutObjectRequest.builder()
-                    .bucket(cfg.s3Bucket)
-                    .key(key)
-                    .build();
+            long thresholdBytes = cfg.multipartThresholdMB * 1024L * 1024L;
+            boolean useMultipart = S3Multipart.needsMultipart(zipPath, thresholdBytes);
 
-            // Use the Path overload (no RequestBody needed)
-            S3ClientHolder.client().putObject(req, zipPath);
+            if (useMultipart) {
+                long partBytes = cfg.multipartPartSizeMB * 1024L * 1024L;
+                S3Multipart.upload(S3ClientHolder.client(), zipPath, cfg.s3Bucket, key, partBytes);
+            } else {
+                PutObjectRequest req = PutObjectRequest.builder().bucket(cfg.s3Bucket).key(key).build();
+                S3ClientHolder.client().putObject(req, zipPath);
+            }
 
             server.sendMessage(Text.literal("[S3Backup] Uploaded to s3://" + cfg.s3Bucket + "/" + key));
-
-            // prune older backups to keep only the newest N
             pruneOldBackupsS3(cfg.s3Bucket, cfg.s3Prefix, cfg.zipBaseName, cfg.keepLastNS3);
 
             if (cfg.deleteLocalAfterUpload && !cfg.keepLatestLocal) {
@@ -325,27 +324,19 @@ public final class BackupService {
             List<S3Object> all = new ArrayList<>();
             String token = null;
             do {
-                ListObjectsV2Request req = ListObjectsV2Request.builder()
-                        .bucket(bucket)
-                        .prefix(keyPrefix)
-                        .continuationToken(token)
-                        .build();
-                ListObjectsV2Response resp = s3.listObjectsV2(req);
+                var req = ListObjectsV2Request.builder().bucket(bucket).prefix(keyPrefix).continuationToken(token).build();
+                var resp = s3.listObjectsV2(req);
                 for (S3Object o : resp.contents()) {
                     String key = o.key();
                     if (key.endsWith(".zip")) {
                         String name = key.substring(key.lastIndexOf('/') + 1);
-                        if (name.startsWith(zipBaseName + "-")) {
-                            all.add(o);
-                        }
+                        if (name.startsWith(zipBaseName + "-")) all.add(o);
                     }
                 }
                 token = resp.isTruncated() ? resp.nextContinuationToken() : null;
             } while (token != null);
 
-            // newest -> oldest
             all.sort((a, b) -> b.lastModified().compareTo(a.lastModified()));
-
             if (all.size() > keepN) {
                 for (int i = keepN; i < all.size(); i++) {
                     String delKey = all.get(i).key();
@@ -354,8 +345,6 @@ public final class BackupService {
                     } catch (Exception ignored) {}
                 }
             }
-        } catch (Exception ignored) {
-            // pruning failures are non-fatal
-        }
+        } catch (Exception ignored) {}
     }
 }
