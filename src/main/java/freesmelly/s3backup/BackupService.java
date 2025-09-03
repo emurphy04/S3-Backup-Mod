@@ -126,7 +126,7 @@ public final class BackupService {
                     .then(CommandManager.literal("set")
                             .then(CommandManager.argument("field", com.mojang.brigadier.arguments.StringArgumentType.word())
                                     .suggests((c,b) -> {
-                                        for (var s : java.util.List.of("region","bucket","prefix","keep","multipartThresholdMB","multipartPartSizeMB","accessKey","secretKey","sessionToken")) b.suggest(s);
+                                        for (var s : java.util.List.of("interval","region","bucket","prefix","keep","multipartThresholdMB","multipartPartSizeMB","accessKey","secretKey","sessionToken")) b.suggest(s);
                                         return b.buildFuture();
                                     })
                                     .then(CommandManager.argument("value", com.mojang.brigadier.arguments.StringArgumentType.greedyString())
@@ -195,9 +195,13 @@ public final class BackupService {
         field = field.toLowerCase();
         switch (field) {
             case "interval" -> {
-                cfg.backupIntervalMinutes = Integer.parseInt(value.trim());
-                saveConfig(cfg);
-                src.sendFeedback(() -> Text.literal("§aInterval set."), false);
+                if (value.trim().equals("0")) {
+                    src.sendFeedback(() -> Text.literal("§cPlease set an interval of at least 1 (Recommended interval is 10 to 30 minutes)."), false);
+                } else {
+                    cfg.backupIntervalMinutes = Integer.parseInt(value.trim());
+                    saveConfig(cfg);
+                    src.sendFeedback(() -> Text.literal("§aInterval set."), false);
+                }
             }
             case "region" -> {
                 cfg.awsRegion = value.trim();
