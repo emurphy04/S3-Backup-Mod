@@ -13,6 +13,7 @@ import net.minecraft.text.Text;
 import net.minecraft.util.WorldSavePath;
 import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.S3Object;
 
@@ -32,7 +33,7 @@ public final class BackupService {
     private static final String MODID = "s3-backup-mod";
 
     private static class Config {
-        int backupIntervalMinutes = 10;
+        int backupIntervalMinutes = 30;
         String s3Bucket = "";
         String s3Prefix = "mc-backups";
         String awsRegion = System.getenv().getOrDefault("AWS_REGION", "us-east-1");
@@ -41,8 +42,9 @@ public final class BackupService {
         String zipBaseName = "world-backup";
         List<String> excludeGlobs = List.of("logs/**","backups/**","crash-reports/**");
         int keepLastNS3 = 5;
-        int multipartThresholdMB = 100;
-        int multipartPartSizeMB = 64;
+        int multipartThresholdMB = 64;
+        int multipartPartSizeMB = 256;
+        int multipartParallelism = 4;
     }
 
     private static volatile Config cfg;
@@ -93,7 +95,7 @@ public final class BackupService {
                         var server = ctx.getSource().getServer();
                         setLogAdminCommands(server, false);
                         ctx.getSource().sendFeedback(() -> Text.literal(
-                                "§a[S3Backup] Wizard started.\n" +
+                                "§a[S3Backup] Wizard started. Command logging temporarily disabled.\n" +
                                         "Step 1: /s3setup set region <aws-region>\n" +
                                         "Step 2: /s3setup set bucket <bucket-name>\n" +
                                         "Step 3: /s3setup set prefix <optional/key/prefix>\n" +
@@ -107,7 +109,7 @@ public final class BackupService {
                     }))
                     .then(CommandManager.literal("finish").executes(ctx -> {
                         restoreLogAdmin(ctx.getSource().getServer());
-                        ctx.getSource().sendFeedback(() -> Text.literal("§a[S3Backup] Wizard finished."), true);
+                        ctx.getSource().sendFeedback(() -> Text.literal("§a[S3Backup] Wizard finished. Command logging restored."), true);
                         return 1;
                     }))
                     .then(CommandManager.literal("show").executes(ctx -> {
@@ -120,18 +122,18 @@ public final class BackupService {
                                         "§bKeep last:      §f" + cfg.keepLastNS3 + "\n" +
                                         "§bMultipart thr.: §f" + cfg.multipartThresholdMB + " MB\n" +
                                         "§bMultipart part: §f" + cfg.multipartPartSizeMB + " MB\n" +
-                                        "§bCreds:          §f" + source), false);
+                                        "§bParallelism:    §f" + cfg.multipartParallelism), false);
                         return 1;
                     }))
                     .then(CommandManager.literal("set")
                             .then(CommandManager.argument("field", com.mojang.brigadier.arguments.StringArgumentType.word())
                                     .suggests((c,b) -> {
-                                        for (var s : java.util.List.of("interval","region","bucket","prefix","keep","multipartThresholdMB","multipartPartSizeMB","accessKey","secretKey","sessionToken")) b.suggest(s);
+                                        for (var s : java.util.List.of("name","interval","region","bucket","prefix","keep","multipartThresholdMB","multipartPartSizeMB","multipartParallelism","accessKey","secretKey","sessionToken")) b.suggest(s);
                                         return b.buildFuture();
                                     })
                                     .then(CommandManager.argument("value", com.mojang.brigadier.arguments.StringArgumentType.greedyString())
                                             .executes(ctx -> {
-                                                String field = com.mojang.brigadier.arguments.StringArgumentType.getString(ctx, "field");
+                                                String field = com.mojang.brigadier.arguments.StringArgumentType.getString(ctx, "field").toLowerCase();
                                                 String value = com.mojang.brigadier.arguments.StringArgumentType.getString(ctx, "value");
                                                 handleSet(ctx.getSource(), field, value);
                                                 return 1;
@@ -178,7 +180,7 @@ public final class BackupService {
             Files.writeString(path, GSON.toJson(c));
             return c;
         } catch (IOException e) {
-            throw new RuntimeException("Failed to load config", e);
+            throw new RuntimeException("Failed to load config");
         }
     }
 
@@ -192,16 +194,16 @@ public final class BackupService {
     }
 
     private static void handleSet(ServerCommandSource src, String field, String value) {
-        field = field.toLowerCase();
         switch (field) {
+            case "name" -> {
+                cfg.zipBaseName = value.trim();
+                saveConfig(cfg);
+                src.sendFeedback(() -> Text.literal("§aBackup name set."), false);
+            }
             case "interval" -> {
-                if (value.trim().equals("0")) {
-                    src.sendFeedback(() -> Text.literal("§cPlease set an interval of at least 1 (Recommended interval is 10 to 30 minutes)."), false);
-                } else {
-                    cfg.backupIntervalMinutes = Integer.parseInt(value.trim());
-                    saveConfig(cfg);
-                    src.sendFeedback(() -> Text.literal("§aInterval set."), false);
-                }
+                cfg.backupIntervalMinutes = Integer.parseInt(value.trim());
+                saveConfig(cfg);
+                src.sendFeedback(() -> Text.literal("§aInterval set."), false);
             }
             case "region" -> {
                 cfg.awsRegion = value.trim();
@@ -225,7 +227,7 @@ public final class BackupService {
                     saveConfig(cfg);
                     src.sendFeedback(() -> Text.literal("§aKeep-last set to " + cfg.keepLastNS3 + "."), false);
                 } catch (NumberFormatException e) {
-                    src.sendError(Text.literal("§cInvalid number for keep."));
+                    src.sendError(Text.literal("§cInvalid number for keep. Example: /s3setup set keep 5"));
                 }
             }
             case "multipartthresholdmb" -> {
@@ -235,7 +237,7 @@ public final class BackupService {
                     saveConfig(cfg);
                     src.sendFeedback(() -> Text.literal("§aMultipart threshold set to " + cfg.multipartThresholdMB + " MB."), false);
                 } catch (NumberFormatException e) {
-                    src.sendError(Text.literal("§cInvalid number for multipartThresholdMB."));
+                    src.sendError(Text.literal("§cInvalid number. Example: /s3setup set multipartThresholdMB 100"));
                 }
             }
             case "multipartpartsizemb" -> {
@@ -245,7 +247,17 @@ public final class BackupService {
                     saveConfig(cfg);
                     src.sendFeedback(() -> Text.literal("§aMultipart part size set to " + cfg.multipartPartSizeMB + " MB."), false);
                 } catch (NumberFormatException e) {
-                    src.sendError(Text.literal("§cInvalid number for multipartPartSizeMB."));
+                    src.sendError(Text.literal("§cInvalid number. Example: /s3setup set multipartPartSizeMB 256"));
+                }
+            }
+            case "multipartparallelism" -> {
+                try {
+                    int p = Integer.parseInt(value.trim());
+                    cfg.multipartParallelism = Math.max(1, p);
+                    saveConfig(cfg);
+                    src.sendFeedback(() -> Text.literal("§aMultipart parallelism set to " + cfg.multipartParallelism + "."), false);
+                } catch (NumberFormatException e) {
+                    src.sendError(Text.literal("§cInvalid number. Example: /s3setup set multipartParallelism 4"));
                 }
             }
             case "accesskey", "secretkey", "sessiontoken" -> {
@@ -255,9 +267,9 @@ public final class BackupService {
                 if (field.equals("secretkey")) s.secretAccessKey = value.trim();
                 if (field.equals("sessiontoken")) s.sessionToken = value.trim();
                 CredentialsStore.save(s);
-                src.sendFeedback(() -> Text.literal("§aCredential saved."), false);
+                src.sendFeedback(() -> Text.literal("§aCredential saved (" + field + "). Value is hidden."), false);
             }
-            default -> src.sendError(Text.literal("§cUnknown field."));
+            default -> src.sendError(Text.literal("§cUnknown field. Use region|bucket|prefix|keep|multipartThresholdMB|multipartPartSizeMB|multipartParallelism|accessKey|secretKey|sessionToken"));
         }
     }
 
@@ -277,45 +289,89 @@ public final class BackupService {
         server.execute(() -> {
             try {
                 server.getCommandManager().executeWithPrefix(server.getCommandSource(), "save-all flush");
+                System.out.println("[S3Backup] World save flushed");
             } finally {
                 done.complete(null);
             }
         });
-        try { done.get(60, TimeUnit.SECONDS); } catch (Exception e) { throw new RuntimeException(e); }
+        try { done.get(120, TimeUnit.SECONDS); } catch (Exception e) { throw new RuntimeException(e); }
     }
 
     private static void runBackupIO(MinecraftServer server) {
+        Path zipPath = null;
+        boolean uploaded = false;
         try {
             Path levelRoot = server.getSavePath(WorldSavePath.ROOT).toAbsolutePath();
             Path outDir = Paths.get("config", MODID);
             Files.createDirectories(outDir);
+
             String ts = LocalDateTime.now().toString().replace(':','-');
             String zipName = cfg.zipBaseName + "-" + ts + ".zip";
-            Path zipPath = outDir.resolve(zipName);
+            zipPath = outDir.resolve(zipName);
+
+            System.out.println("[S3Backup] Zipping from " + levelRoot + " to " + zipPath);
+            long zipStart = System.nanoTime();
             ZipUtil.zipDirectory(levelRoot, zipPath, cfg.excludeGlobs);
+            long size = Files.size(zipPath);
+            double zipSecs = (System.nanoTime() - zipStart) / 1_000_000_000.0;
+            System.out.println(String.format("[S3Backup] Zip complete: %,d bytes in %.2fs", size, zipSecs));
+
             String prefix = (cfg.s3Prefix == null) ? "" : cfg.s3Prefix.replaceAll("^/+", "").replaceAll("/+$","");
             String key = prefix.isBlank() ? zipName : prefix + "/" + zipName;
 
             long thresholdBytes = cfg.multipartThresholdMB * 1024L * 1024L;
             boolean useMultipart = S3Multipart.needsMultipart(zipPath, thresholdBytes);
+            System.out.println("[S3Backup] Upload strategy: " + (useMultipart ? "multipart" : "single") +
+                    " threshold=" + thresholdBytes + " bytes partSize=" + (cfg.multipartPartSizeMB * 1024L * 1024L) +
+                    " parallelism=" + cfg.multipartParallelism);
 
+            long uploadStart = System.nanoTime();
             if (useMultipart) {
                 long partBytes = cfg.multipartPartSizeMB * 1024L * 1024L;
-                S3Multipart.upload(S3ClientHolder.client(), zipPath, cfg.s3Bucket, key, partBytes);
+                if (cfg.multipartParallelism > 1) {
+                    S3Multipart.uploadParallel(S3ClientHolder.client(), zipPath, cfg.s3Bucket, key, partBytes, cfg.multipartParallelism);
+                } else {
+                    S3Multipart.upload(S3ClientHolder.client(), zipPath, cfg.s3Bucket, key, partBytes);
+                }
             } else {
+                System.out.println("[S3Backup] Single PUT starting: " + key + " (" + size + " bytes)");
                 PutObjectRequest req = PutObjectRequest.builder().bucket(cfg.s3Bucket).key(key).build();
                 S3ClientHolder.client().putObject(req, zipPath);
             }
+            double uploadSecs = (System.nanoTime() - uploadStart) / 1_000_000_000.0;
+            double mbps = (size / (1024.0 * 1024.0)) / Math.max(0.001, uploadSecs);
+            System.out.println(String.format("[S3Backup] Upload complete: %s in %.2fs (%.2f MiB/s)", key, uploadSecs, mbps));
 
+            uploaded = true;
             server.sendMessage(Text.literal("[S3Backup] Uploaded to s3://" + cfg.s3Bucket + "/" + key));
             pruneOldBackupsS3(cfg.s3Bucket, cfg.s3Prefix, cfg.zipBaseName, cfg.keepLastNS3);
 
-            if (cfg.deleteLocalAfterUpload && !cfg.keepLatestLocal) {
-                try { Files.deleteIfExists(zipPath); } catch (IOException ignored) {}
-            }
         } catch (Exception e) {
+            System.err.println("[S3Backup] Backup failed: " + e.getMessage());
             throw new RuntimeException(e);
+        } finally {
+            if (uploaded && zipPath != null && cfg.deleteLocalAfterUpload && !cfg.keepLatestLocal) {
+                System.out.println("[S3Backup] Deleting local zip: " + zipPath);
+                deleteWithRetry(zipPath, 12, 500);
+            } else if (zipPath != null) {
+                System.out.println("[S3Backup] Keeping local zip: " + zipPath);
+            }
         }
+    }
+
+    private static void deleteWithRetry(Path path, int attempts, long sleepMillis) {
+        for (int i = 0; i < attempts; i++) {
+            try {
+                if (!Files.exists(path)) return;
+                Files.delete(path);
+                System.out.println("[S3Backup] Local zip deleted: " + path);
+                return;
+            } catch (IOException e) {
+                try { Thread.sleep(sleepMillis); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); return; }
+            }
+        }
+        try { path.toFile().deleteOnExit(); } catch (Throwable ignored) {}
+        System.err.println("[S3Backup] Failed to delete local zip, marked deleteOnExit: " + path);
     }
 
     private static void pruneOldBackupsS3(String bucket, String prefix, String zipBaseName, int keepN) {
@@ -329,12 +385,11 @@ public final class BackupService {
             String token = null;
             do {
                 var req = ListObjectsV2Request.builder().bucket(bucket).prefix(keyPrefix).continuationToken(token).build();
-                var resp = s3.listObjectsV2(req);
+                ListObjectsV2Response resp = s3.listObjectsV2(req);
                 for (S3Object o : resp.contents()) {
                     String key = o.key();
                     if (key.endsWith(".zip")) {
-                        String name = key.substring(key.lastIndexOf('/') + 1);
-                        if (name.startsWith(zipBaseName + "-")) all.add(o);
+                        all.add(o);
                     }
                 }
                 token = resp.isTruncated() ? resp.nextContinuationToken() : null;
@@ -346,6 +401,7 @@ public final class BackupService {
                     String delKey = all.get(i).key();
                     try {
                         s3.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(delKey).build());
+                        System.out.println("[S3Backup] Deleted old S3 backup: " + delKey);
                     } catch (Exception ignored) {}
                 }
             }
