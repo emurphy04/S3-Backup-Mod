@@ -82,22 +82,31 @@ Ensure your credentials/role can write to the bucket and manage objects for prun
 ```json
 {
   "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Action": [
-      "s3:PutObject",
-      "s3:AbortMultipartUpload",
-      "s3:ListBucket",
-      "s3:GetBucketLocation",
-      "s3:ListBucketMultipartUploads",
-      "s3:ListMultipartUploadParts",
-      "s3:DeleteObject"
-    ],
-    "Resource": [
-      "arn:aws:s3:::YOUR_BUCKET_NAME",
-      "arn:aws:s3:::YOUR_BUCKET_NAME/*"
-    ]
-  }]
+  "Statement": [
+    {
+      "Sid": "ListOnlyWithinPrefix",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": "arn:aws:s3:::YOUR_BUCKET",
+      "Condition": {
+        "StringLike": { "s3:prefix": ["YOUR_PREFIX/*"] }
+      }
+    },
+    {
+      "Sid": "WriteReadMPUForBackups",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:CreateMultipartUpload",
+        "s3:UploadPart",
+        "s3:CompleteMultipartUpload",
+        "s3:AbortMultipartUpload"
+      ],
+      "Resource": "arn:aws:s3:::YOUR_BUCKET/YOUR_PREFIX/*"
+    }
+  ]
 }
+
 
 ```
