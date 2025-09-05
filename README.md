@@ -1,6 +1,6 @@
 # S3 Backup Mod (Fabric • Server-Only)
 
-![Green Minecraft Bucket](src/main/resources/assets/s3-backup-mod/GreenBucket.png)
+![Green Minecraft Bucket](https://cdn.modrinth.com/data/cached_images/1ef5ba6809f320f0dd9adc8857a28bb8b813ae28.png)
 
 Back up your Minecraft server world to Amazon S3 on a schedule — with an in-game setup wizard, a manual `/backupnow` command, and automatic pruning to **keep only the newest N backups**.
 
@@ -16,8 +16,6 @@ Back up your Minecraft server world to Amazon S3 on a schedule — with an in-ga
 - **Fabric Loader** and **Fabric API (required)**  
 - **Java 21**  
 - **AWS account** with access to an S3 bucket (see **IAM Permissions** at the bottom)
-
-> If other mods on your server use Kotlin, you’ll also need **Fabric Language Kotlin**. This mod itself does **not** require Kotlin.
 
 ---
 
@@ -41,16 +39,19 @@ A non-secret config file is generated at:
 ```
 ```json
   {
-    "backupIntervalMinutes": 10,
-    "s3Bucket": "",
-    "s3Prefix": "mc-backups",
+    "backupIntervalMinutes": 30,
+    "s3Bucket": "YOUR_BUCKET",
+    "s3Prefix": "YOUR_PREFIX",
     "awsRegion": "us-east-1",
+    "zipBaseName": "world-backup",
+    "excludeGlobs": ["logs/**", "crash-reports/**", "backups/**", "*.log", "**/session.lock"],
+    "keepLastNS3": 5,
     "keepLatestLocal": false,
     "deleteLocalAfterUpload": true,
-    "zipBaseName": "world-backup",
-    "excludeGlobs": ["logs/**", "backups/**", "crash-reports/**"],
-    "keepLastNS3": 5
-    }
+    "multipartThresholdMB": 64,
+    "multipartPartSizeMB": 256,
+    "multipartParallelism": 4
+  }
 ```
 
 ## Usage
@@ -58,16 +59,15 @@ A non-secret config file is generated at:
 In-game commands to run with admin permissions:
 
 ```
-/s3setup wizard
+/s3setup set name YOUR_WORLD_NAME //Optional
+/s3setup set interval 30          //Default is 30 minutes
+/s3setup set bucket YOUR_BUCKET
+/s3setup set prefix YOUR_PREFIX
 /s3setup set region us-east-1
-/s3setup set bucket your-bucket-name
-/s3setup set prefix mc-backups             # optional
-/s3setup set keep 5                        # <-- how many backups to keep (very important)
-/s3setup set accessKey AKIA................
-/s3setup set secretKey <your-secret>
-/s3setup set sessionToken <token>          # only if using temporary creds
-/s3setup test
-/s3setup finish
+/s3setup set multipartThresholdMB 64
+/s3setup set multipartPartSizeMB 512
+/s3setup set multipartParallelism 4
+/s3setup set keep 5
 ```
 Extra commands:
 
